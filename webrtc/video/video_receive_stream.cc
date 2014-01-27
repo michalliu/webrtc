@@ -59,10 +59,21 @@ VideoReceiveStream::VideoReceiveStream(webrtc::VideoEngine* video_engine,
   }
 
   assert(config_.rtp.remote_ssrc != 0);
+  // TODO(pbos): What's an appropriate local_ssrc for receive-only streams?
   assert(config_.rtp.local_ssrc != 0);
   assert(config_.rtp.remote_ssrc != config_.rtp.local_ssrc);
 
   rtp_rtcp_->SetLocalSSRC(channel_, config_.rtp.local_ssrc);
+  // TODO(pbos): Support multiple RTX, per video payload.
+  Config::Rtp::RtxMap::const_iterator it = config_.rtp.rtx.begin();
+  if (it != config_.rtp.rtx.end()) {
+    assert(it->second.ssrc != 0);
+    assert(it->second.payload_type != 0);
+
+    rtp_rtcp_->SetRemoteSSRCType(channel_, kViEStreamTypeRtx, it->second.ssrc);
+    rtp_rtcp_->SetRtxReceivePayloadType(channel_, it->second.payload_type);
+  }
+
   rtp_rtcp_->SetRembStatus(channel_, false, config_.rtp.remb);
 
   for (size_t i = 0; i < config_.rtp.extensions.size(); ++i) {
@@ -102,8 +113,7 @@ VideoReceiveStream::VideoReceiveStream(webrtc::VideoEngine* video_engine,
             decoder->payload_type,
             decoder->decoder,
             decoder->renderer,
-            decoder->expected_delay_ms) !=
-        0) {
+            decoder->expected_delay_ms) != 0) {
       // TODO(pbos): Abort gracefully? Can this be a runtime error?
       abort();
     }
@@ -126,6 +136,10 @@ VideoReceiveStream::VideoReceiveStream(webrtc::VideoEngine* video_engine,
   }
   image_process_->RegisterPreRenderCallback(channel_,
                                             config_.pre_render_callback);
+
+  if (config.rtp.rtcp_xr.receiver_reference_time_report) {
+    rtp_rtcp_->SetRtcpXrRrtrStatus(channel_, true);
+  }
 
   clock_ = Clock::GetRealTimeClock();
 }
@@ -154,6 +168,7 @@ VideoReceiveStream::~VideoReceiveStream() {
 }
 
 void VideoReceiveStream::StartReceiving() {
+  transport_adapter_.Enable();
   if (render_->StartRender(channel_) != 0)
     abort();
   if (video_engine_base_->StartReceive(channel_) != 0)
@@ -165,6 +180,7 @@ void VideoReceiveStream::StopReceiving() {
     abort();
   if (video_engine_base_->StopReceive(channel_) != 0)
     abort();
+  transport_adapter_.Disable();
 }
 
 void VideoReceiveStream::GetCurrentReceiveCodec(VideoCodec* receive_codec) {
@@ -178,8 +194,7 @@ bool VideoReceiveStream::DeliverRtcp(const uint8_t* packet, size_t length) {
 
 bool VideoReceiveStream::DeliverRtp(const uint8_t* packet, size_t length) {
   return network_->ReceivedRTPPacket(
-             channel_, packet, static_cast<int>(length),
-             PacketTime()) == 0;
+             channel_, packet, static_cast<int>(length), PacketTime()) == 0;
 }
 
 int32_t VideoReceiveStream::RenderFrame(const uint32_t stream_id,

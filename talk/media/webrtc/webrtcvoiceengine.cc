@@ -1433,20 +1433,23 @@ bool WebRtcVoiceEngine::SetAudioDeviceModule(webrtc::AudioDeviceModule* adm,
   return true;
 }
 
-bool WebRtcVoiceEngine::StartAecDump(FILE* file) {
-#ifdef USE_WEBRTC_DEV_BRANCH
+bool WebRtcVoiceEngine::StartAecDump(talk_base::PlatformFile file) {
+  FILE* aec_dump_file_stream = talk_base::FdopenPlatformFileForWriting(file);
+  if (!aec_dump_file_stream) {
+    LOG(LS_ERROR) << "Could not open AEC dump file stream.";
+    if (!talk_base::ClosePlatformFile(file))
+      LOG(LS_WARNING) << "Could not close file.";
+    return false;
+  }
   StopAecDump();
-  if (voe_wrapper_->processing()->StartDebugRecording(file) !=
+  if (voe_wrapper_->processing()->StartDebugRecording(aec_dump_file_stream) !=
       webrtc::AudioProcessing::kNoError) {
-    LOG_RTCERR1(StartDebugRecording, "FILE*");
-    fclose(file);
+    LOG_RTCERR0(StartDebugRecording);
+    fclose(aec_dump_file_stream);
     return false;
   }
   is_dumping_aec_ = true;
   return true;
-#else
-  return false;
-#endif
 }
 
 bool WebRtcVoiceEngine::RegisterProcessor(
@@ -1655,7 +1658,6 @@ WebRtcVoiceMediaChannel::WebRtcVoiceMediaChannel(WebRtcVoiceEngine *engine)
           engine,
           engine->CreateMediaVoiceChannel()),
       send_bw_setting_(false),
-      send_autobw_(false),
       send_bw_bps_(0),
       options_(),
       dtmf_allowed_(false),
@@ -1769,7 +1771,7 @@ bool WebRtcVoiceMediaChannel::SetOptions(const AudioOptions& options) {
   }
   if (dscp_option_changed) {
     talk_base::DiffServCodePoint dscp = talk_base::DSCP_DEFAULT;
-    if (options.dscp.GetWithDefaultIfUnset(false))
+    if (options_.dscp.GetWithDefaultIfUnset(false))
       dscp = kAudioDscpValue;
     if (MediaChannel::SetDscp(dscp) != 0) {
       LOG(LS_WARNING) << "Failed to set DSCP settings for audio channel";
@@ -1879,7 +1881,7 @@ bool WebRtcVoiceMediaChannel::SetSendCodecs(
     // this, but double-check to be sure.
     webrtc::CodecInst voe_codec;
     if (!engine()->FindWebRtcCodec(*it, &voe_codec)) {
-      LOG(LS_WARNING) << "Unknown codec " << ToString(voe_codec);
+      LOG(LS_WARNING) << "Unknown codec " << ToString(*it);
       continue;
     }
 
@@ -2023,7 +2025,7 @@ bool WebRtcVoiceMediaChannel::SetSendCodecs(
   send_codec_.reset(new webrtc::CodecInst(send_codec));
 
   if (send_bw_setting_) {
-    SetSendBandwidthInternal(send_autobw_, send_bw_bps_);
+    SetSendBandwidthInternal(send_bw_bps_);
   }
 
   return true;
@@ -2431,14 +2433,14 @@ bool WebRtcVoiceMediaChannel::ConfigureRecvChannel(int channel) {
   }
 
   // Use the same SSRC as our default channel (so the RTCP reports are correct).
-  unsigned int send_ssrc;
+  unsigned int send_ssrc = 0;
   webrtc::VoERTP_RTCP* rtp = engine()->voe()->rtp();
   if (rtp->GetLocalSSRC(voe_channel(), send_ssrc) == -1) {
-    LOG_RTCERR2(GetSendSSRC, channel, send_ssrc);
+    LOG_RTCERR1(GetSendSSRC, channel);
     return false;
   }
   if (rtp->SetLocalSSRC(channel, send_ssrc) == -1) {
-    LOG_RTCERR2(SetSendSSRC, channel, send_ssrc);
+    LOG_RTCERR1(SetSendSSRC, channel);
     return false;
   }
 
@@ -2928,18 +2930,23 @@ bool WebRtcVoiceMediaChannel::MuteStream(uint32 ssrc, bool muted) {
   return true;
 }
 
-bool WebRtcVoiceMediaChannel::SetSendBandwidth(bool autobw, int bps) {
-  LOG(LS_INFO) << "WebRtcVoiceMediaChanne::SetSendBandwidth.";
-
-  send_bw_setting_ = true;
-  send_autobw_ = autobw;
-  send_bw_bps_ = bps;
-
-  return SetSendBandwidthInternal(send_autobw_, send_bw_bps_);
+bool WebRtcVoiceMediaChannel::SetStartSendBandwidth(int bps) {
+  // TODO(andresp): Add support for setting an independent start bandwidth when
+  // bandwidth estimation is enabled for voice engine.
+  return false;
 }
 
-bool WebRtcVoiceMediaChannel::SetSendBandwidthInternal(bool autobw, int bps) {
-  LOG(LS_INFO) << "WebRtcVoiceMediaChanne::SetSendBandwidthInternal.";
+bool WebRtcVoiceMediaChannel::SetMaxSendBandwidth(int bps) {
+  LOG(LS_INFO) << "WebRtcVoiceMediaChanne::SetSendBandwidth.";
+
+  return SetSendBandwidthInternal(bps);
+}
+
+bool WebRtcVoiceMediaChannel::SetSendBandwidthInternal(int bps) {
+  LOG(LS_INFO) << "WebRtcVoiceMediaChannel::SetSendBandwidthInternal.";
+
+  send_bw_setting_ = true;
+  send_bw_bps_ = bps;
 
   if (!send_codec_) {
     LOG(LS_INFO) << "The send codec has not been set up yet. "
@@ -2948,7 +2955,9 @@ bool WebRtcVoiceMediaChannel::SetSendBandwidthInternal(bool autobw, int bps) {
   }
 
   // Bandwidth is auto by default.
-  if (autobw || bps <= 0)
+  // TODO(bemasc): Fix this so that if SetMaxSendBandwidth(50) is followed by
+  // SetMaxSendBandwith(0), the second call removes the previous limit.
+  if (bps <= 0)
     return true;
 
   webrtc::CodecInst codec = *send_codec_;

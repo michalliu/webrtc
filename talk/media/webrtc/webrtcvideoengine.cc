@@ -632,6 +632,10 @@ class WebRtcVideoChannelSendInfo : public sigslot::has_slots<> {
     }
   }
 
+  bool AdaptFrame(const VideoFrame* in_frame, const VideoFrame** out_frame) {
+    *out_frame = NULL;
+    return video_adapter_->AdaptFrame(in_frame, out_frame);
+  }
   int CurrentAdaptReason() const {
     return video_adapter_->adapt_reason();
   }
@@ -672,16 +676,7 @@ class WebRtcVideoChannelSendInfo : public sigslot::has_slots<> {
         // video capturer.
         video_adapter_->SetInputFormat(*capture_format);
       }
-      // TODO(thorcarpenter): When the adapter supports "only frame dropping"
-      // mode, also hook it up to screencast capturers.
-      video_capturer->SignalAdaptFrame.connect(
-          this, &WebRtcVideoChannelSendInfo::AdaptFrame);
     }
-  }
-
-  void AdaptFrame(VideoCapturer* capturer, const VideoFrame* input,
-                  VideoFrame** adapted) {
-    video_adapter_->AdaptFrame(input, adapted);
   }
 
   void ApplyCpuOptions(const VideoOptions& options) {
@@ -1310,6 +1305,8 @@ static void AddDefaultFeedbackParams(VideoCodec* codec) {
   codec->AddFeedbackParam(kFir);
   const FeedbackParam kNack(kRtcpFbParamNack, kParamValueEmpty);
   codec->AddFeedbackParam(kNack);
+  const FeedbackParam kPli(kRtcpFbParamNack, kRtcpFbNackParamPli);
+  codec->AddFeedbackParam(kPli);
   const FeedbackParam kRemb(kRtcpFbParamRemb, kParamValueEmpty);
   codec->AddFeedbackParam(kRemb);
 }
@@ -2303,7 +2300,6 @@ bool WebRtcVideoMediaChannel::GetStats(VideoMediaInfo* info) {
       sinfo.encode_usage_percent = -1;
       sinfo.capture_queue_delay_ms_per_s = -1;
 
-#ifdef USE_WEBRTC_DEV_BRANCH
       int capture_jitter_ms = 0;
       int avg_encode_time_ms = 0;
       int encode_usage_percent = 0;
@@ -2319,7 +2315,6 @@ bool WebRtcVideoMediaChannel::GetStats(VideoMediaInfo* info) {
         sinfo.encode_usage_percent = encode_usage_percent;
         sinfo.capture_queue_delay_ms_per_s = capture_queue_delay_ms_per_s;
       }
-#endif
 
       // Get received RTCP statistics for the sender (reported by the remote
       // client in a RTCP packet), if available.
@@ -2501,12 +2496,8 @@ void WebRtcVideoMediaChannel::OnPacketReceived(
   engine()->vie()->network()->ReceivedRTPPacket(
       which_channel,
       packet->data(),
-#ifdef USE_WEBRTC_DEV_BRANCH
       static_cast<int>(packet->length()),
       webrtc::PacketTime(packet_time.timestamp, packet_time.not_before));
-#else
-      static_cast<int>(packet->length()));
-#endif
 }
 
 void WebRtcVideoMediaChannel::OnRtcpReceived(
@@ -2622,11 +2613,27 @@ bool WebRtcVideoMediaChannel::SetSendRtpHeaderExtensions(
   return true;
 }
 
-bool WebRtcVideoMediaChannel::SetSendBandwidth(bool autobw, int bps) {
-  LOG(LS_INFO) << "WebRtcVideoMediaChanne::SetSendBandwidth";
+bool WebRtcVideoMediaChannel::SetStartSendBandwidth(int bps) {
+  LOG(LS_INFO) << "WebRtcVideoMediaChannel::SetStartSendBandwidth";
+
+  if (!send_codec_) {
+    LOG(LS_INFO) << "The send codec has not been set up yet";
+    return true;
+  }
+
+  // On success, SetSendCodec() will reset |send_start_bitrate_| to |bps/1000|,
+  // by calling MaybeChangeStartBitrate.  That method will also clamp the
+  // start bitrate between min and max, consistent with the override behavior
+  // in SetMaxSendBandwidth.
+  return SetSendCodec(*send_codec_,
+      send_min_bitrate_, bps / 1000, send_max_bitrate_);
+}
+
+bool WebRtcVideoMediaChannel::SetMaxSendBandwidth(int bps) {
+  LOG(LS_INFO) << "WebRtcVideoMediaChannel::SetMaxSendBandwidth";
 
   if (InConferenceMode()) {
-    LOG(LS_INFO) << "Conference mode ignores SetSendBandWidth";
+    LOG(LS_INFO) << "Conference mode ignores SetMaxSendBandwidth";
     return true;
   }
 
@@ -2635,28 +2642,17 @@ bool WebRtcVideoMediaChannel::SetSendBandwidth(bool autobw, int bps) {
     return true;
   }
 
-  int min_bitrate;
-  int start_bitrate;
-  int max_bitrate;
-  if (autobw) {
-    // Use the default values for min bitrate.
-    min_bitrate = send_min_bitrate_;
-    // Use the default value or the bps for the max
-    max_bitrate = (bps <= 0) ? send_max_bitrate_ : (bps / 1000);
-    // Maximum start bitrate can be kStartVideoBitrate.
-    start_bitrate = talk_base::_min(kStartVideoBitrate, max_bitrate);
-  } else {
-    // Use the default start or the bps as the target bitrate.
-    int target_bitrate = (bps <= 0) ? kStartVideoBitrate : (bps / 1000);
-    min_bitrate = target_bitrate;
-    start_bitrate = target_bitrate;
-    max_bitrate = target_bitrate;
-  }
+  // Use the default value or the bps for the max
+  int max_bitrate = (bps <= 0) ? send_max_bitrate_ : (bps / 1000);
+
+  // Reduce the current minimum and start bitrates if necessary.
+  int min_bitrate = talk_base::_min(send_min_bitrate_, max_bitrate);
+  int start_bitrate = talk_base::_min(send_start_bitrate_, max_bitrate);
 
   if (!SetSendCodec(*send_codec_, min_bitrate, start_bitrate, max_bitrate)) {
     return false;
   }
-  LogSendCodecChange("SetSendBandwidth()");
+  LogSendCodecChange("SetMaxSendBandwidth()");
 
   return true;
 }
@@ -2787,7 +2783,7 @@ bool WebRtcVideoMediaChannel::SetOptions(const VideoOptions &options) {
   }
   if (dscp_option_changed) {
     talk_base::DiffServCodePoint dscp = talk_base::DSCP_DEFAULT;
-    if (options.dscp.GetWithDefaultIfUnset(false))
+    if (options_.dscp.GetWithDefaultIfUnset(false))
       dscp = kVideoDscpValue;
     if (MediaChannel::SetDscp(dscp) != 0) {
       LOG(LS_WARNING) << "Failed to set DSCP settings for video channel";
@@ -2858,6 +2854,7 @@ bool WebRtcVideoMediaChannel::GetRenderer(uint32 ssrc,
   return true;
 }
 
+// TODO(zhurunz): Add unittests to test this function.
 void WebRtcVideoMediaChannel::SendFrame(VideoCapturer* capturer,
                                         const VideoFrame* frame) {
   // If the |capturer| is registered to any send channel, then send the frame

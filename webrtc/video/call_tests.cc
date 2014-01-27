@@ -18,7 +18,6 @@
 
 #include "webrtc/call.h"
 #include "webrtc/frame_callback.h"
-#include "webrtc/modules/rtp_rtcp/interface/rtp_header_parser.h"
 #include "webrtc/modules/rtp_rtcp/source/rtcp_utility.h"
 #include "webrtc/system_wrappers/interface/critical_section_wrapper.h"
 #include "webrtc/system_wrappers/interface/event_wrapper.h"
@@ -30,6 +29,7 @@
 #include "webrtc/test/fake_encoder.h"
 #include "webrtc/test/frame_generator.h"
 #include "webrtc/test/frame_generator_capturer.h"
+#include "webrtc/test/null_transport.h"
 #include "webrtc/test/rtp_rtcp_observer.h"
 #include "webrtc/test/testsupport/fileutils.h"
 #include "webrtc/test/testsupport/perf_test.h"
@@ -40,8 +40,10 @@ namespace webrtc {
 static unsigned int kDefaultTimeoutMs = 30 * 1000;
 static unsigned int kLongTimeoutMs = 120 * 1000;
 static const uint32_t kSendSsrc = 0x654321;
+static const uint32_t kSendRtxSsrc = 0x424242;
 static const uint32_t kReceiverLocalSsrc = 0x123456;
 static const uint8_t kSendPayloadType = 125;
+static const uint8_t kSendRtxPayloadType = 126;
 
 class CallTest : public ::testing::Test {
  public:
@@ -124,8 +126,10 @@ class CallTest : public ::testing::Test {
     receive_stream_ = NULL;
   }
 
+  void DecodesRetransmittedFrame(bool retransmit_over_rtx);
   void ReceivesPliAndRecovers(int rtp_history_ms);
   void RespectsRtcpMode(newapi::RtcpMode rtcp_mode);
+  void TestXrReceiverReferenceTimeReport(bool enable_rrtr);
 
   scoped_ptr<Call> sender_call_;
   scoped_ptr<Call> receiver_call_;
@@ -157,8 +161,6 @@ class NackObserver : public test::RtpRtcpObserver {
 
  private:
   virtual Action OnSendRtp(const uint8_t* packet, size_t length) OVERRIDE {
-    EXPECT_FALSE(RtpHeaderParser::IsRtcp(packet, static_cast<int>(length)));
-
     RTPHeader header;
     EXPECT_TRUE(rtp_parser_->Parse(packet, static_cast<int>(length), &header));
 
@@ -271,6 +273,32 @@ TEST_F(CallTest, UsesTraceCallback) {
   receiver_call_.reset();
 }
 
+TEST_F(CallTest, ReceiverCanBeStartedTwice) {
+  test::NullTransport transport;
+  CreateCalls(Call::Config(&transport), Call::Config(&transport));
+
+  CreateTestConfigs();
+  CreateStreams();
+
+  receive_stream_->StartReceiving();
+  receive_stream_->StartReceiving();
+
+  DestroyStreams();
+}
+
+TEST_F(CallTest, ReceiverCanBeStoppedTwice) {
+  test::NullTransport transport;
+  CreateCalls(Call::Config(&transport), Call::Config(&transport));
+
+  CreateTestConfigs();
+  CreateStreams();
+
+  receive_stream_->StopReceiving();
+  receive_stream_->StopReceiving();
+
+  DestroyStreams();
+}
+
 TEST_F(CallTest, RendersSingleDelayedFrame) {
   static const int kWidth = 320;
   static const int kHeight = 240;
@@ -300,7 +328,7 @@ TEST_F(CallTest, RendersSingleDelayedFrame) {
     EventTypeWrapper Wait() { return event_->Wait(kDefaultTimeoutMs); }
 
    private:
-    virtual void FrameCallback(I420VideoFrame* frame) {
+    virtual void FrameCallback(I420VideoFrame* frame) OVERRIDE {
       SleepMs(kDelayRenderCallbackMs);
       event_->Set();
     }
@@ -457,6 +485,99 @@ TEST_F(CallTest, ReceivesAndRetransmitsNack) {
   DestroyStreams();
 }
 
+// This test drops second RTP packet with a marker bit set, makes sure it's
+// retransmitted and renders. Retransmission SSRCs are also checked.
+void CallTest::DecodesRetransmittedFrame(bool retransmit_over_rtx) {
+  static const int kDroppedFrameNumber = 2;
+  class RetransmissionObserver : public test::RtpRtcpObserver,
+                                 public I420FrameCallback {
+   public:
+    RetransmissionObserver(bool expect_rtx)
+        : RtpRtcpObserver(kDefaultTimeoutMs),
+          retransmission_ssrc_(expect_rtx ? kSendRtxSsrc : kSendSsrc),
+          retransmission_payload_type_(expect_rtx ? kSendRtxPayloadType
+                                                  : kSendPayloadType),
+          marker_bits_observed_(0),
+          retransmitted_timestamp_(0),
+          frame_retransmitted_(false) {}
+
+   private:
+    virtual Action OnSendRtp(const uint8_t* packet, size_t length) OVERRIDE {
+      RTPHeader header;
+      EXPECT_TRUE(parser_->Parse(packet, static_cast<int>(length), &header));
+
+      if (header.timestamp == retransmitted_timestamp_) {
+        EXPECT_EQ(retransmission_ssrc_, header.ssrc);
+        EXPECT_EQ(retransmission_payload_type_, header.payloadType);
+        frame_retransmitted_ = true;
+        return SEND_PACKET;
+      }
+
+      EXPECT_EQ(kSendSsrc, header.ssrc);
+      EXPECT_EQ(kSendPayloadType, header.payloadType);
+
+      // Found the second frame's final packet, drop this and expect a
+      // retransmission.
+      if (header.markerBit && ++marker_bits_observed_ == kDroppedFrameNumber) {
+        retransmitted_timestamp_ = header.timestamp;
+        return DROP_PACKET;
+      }
+
+      return SEND_PACKET;
+    }
+
+    virtual void FrameCallback(I420VideoFrame* frame) OVERRIDE {
+      CriticalSectionScoped crit_(lock_.get());
+      if (frame->timestamp() == retransmitted_timestamp_) {
+        EXPECT_TRUE(frame_retransmitted_);
+        observation_complete_->Set();
+      }
+    }
+
+    const uint32_t retransmission_ssrc_;
+    const int retransmission_payload_type_;
+    int marker_bits_observed_;
+    uint32_t retransmitted_timestamp_;
+    bool frame_retransmitted_;
+  } observer(retransmit_over_rtx);
+
+  CreateCalls(Call::Config(observer.SendTransport()),
+              Call::Config(observer.ReceiveTransport()));
+
+  observer.SetReceivers(receiver_call_->Receiver(), sender_call_->Receiver());
+
+  CreateTestConfigs();
+  send_config_.rtp.nack.rtp_history_ms =
+      receive_config_.rtp.nack.rtp_history_ms = 1000;
+  if (retransmit_over_rtx) {
+    send_config_.rtp.rtx.ssrcs.push_back(kSendRtxSsrc);
+    send_config_.rtp.rtx.payload_type = kSendRtxPayloadType;
+    int payload_type = send_config_.codec.plType;
+    receive_config_.rtp.rtx[payload_type].ssrc = kSendRtxSsrc;
+    receive_config_.rtp.rtx[payload_type].payload_type = kSendRtxPayloadType;
+  }
+  receive_config_.pre_render_callback = &observer;
+
+  CreateStreams();
+  CreateFrameGenerator();
+  StartSending();
+
+  EXPECT_EQ(kEventSignaled, observer.Wait())
+      << "Timed out while waiting for retransmission to render.";
+
+  StopSending();
+  observer.StopSending();
+  DestroyStreams();
+}
+
+TEST_F(CallTest, DecodesRetransmittedFrame) {
+  DecodesRetransmittedFrame(false);
+}
+
+TEST_F(CallTest, DecodesRetransmittedFrameOverRtx) {
+  DecodesRetransmittedFrame(true);
+}
+
 TEST_F(CallTest, UsesFrameCallbacks) {
   static const int kWidth = 320;
   static const int kHeight = 240;
@@ -560,7 +681,6 @@ class PliObserver : public test::RtpRtcpObserver, public VideoRenderer {
  public:
   explicit PliObserver(bool nack_enabled)
       : test::RtpRtcpObserver(kLongTimeoutMs),
-        rtp_header_parser_(RtpHeaderParser::Create()),
         nack_enabled_(nack_enabled),
         highest_dropped_timestamp_(0),
         frames_to_drop_(0),
@@ -568,8 +688,7 @@ class PliObserver : public test::RtpRtcpObserver, public VideoRenderer {
 
   virtual Action OnSendRtp(const uint8_t* packet, size_t length) OVERRIDE {
     RTPHeader header;
-    EXPECT_TRUE(
-        rtp_header_parser_->Parse(packet, static_cast<int>(length), &header));
+    EXPECT_TRUE(parser_->Parse(packet, static_cast<int>(length), &header));
 
     // Drop all retransmitted packets to force a PLI.
     if (header.timestamp <= highest_dropped_timestamp_)
@@ -615,7 +734,6 @@ class PliObserver : public test::RtpRtcpObserver, public VideoRenderer {
  private:
   static const int kPacketsToDrop = 1;
 
-  scoped_ptr<RtpHeaderParser> rtp_header_parser_;
   bool nack_enabled_;
   uint32_t highest_dropped_timestamp_;
   int frames_to_drop_;
@@ -905,9 +1023,10 @@ TEST_F(CallTest, SendsAndReceivesMultipleStreams) {
 TEST_F(CallTest, ObserversEncodedFrames) {
   class EncodedFrameTestObserver : public EncodedFrameObserver {
    public:
-    EncodedFrameTestObserver() : length_(0),
-                                 frame_type_(kFrameEmpty),
-                                 called_(EventWrapper::Create()) {}
+    EncodedFrameTestObserver()
+        : length_(0),
+          frame_type_(kFrameEmpty),
+          called_(EventWrapper::Create()) {}
     virtual ~EncodedFrameTestObserver() {}
 
     virtual void EncodedFrameCallback(const EncodedFrame& encoded_frame) {
@@ -918,9 +1037,7 @@ TEST_F(CallTest, ObserversEncodedFrames) {
       called_->Set();
     }
 
-    EventTypeWrapper Wait() {
-      return called_->Wait(kDefaultTimeoutMs);
-    }
+    EventTypeWrapper Wait() { return called_->Wait(kDefaultTimeoutMs); }
 
     void ExpectEqualFrames(const EncodedFrameTestObserver& observer) {
       ASSERT_EQ(length_, observer.length_)
@@ -1023,5 +1140,101 @@ TEST_F(CallTest, ReceiveStreamSendsRemb) {
   StopSending();
   observer.StopSending();
   DestroyStreams();
+}
+
+void CallTest::TestXrReceiverReferenceTimeReport(bool enable_rrtr) {
+  static const int kNumRtcpReportPacketsToObserve = 5;
+  class RtcpXrObserver : public test::RtpRtcpObserver {
+   public:
+    explicit RtcpXrObserver(bool enable_rrtr)
+        : test::RtpRtcpObserver(kDefaultTimeoutMs),
+          enable_rrtr_(enable_rrtr),
+          sent_rtcp_sr_(0),
+          sent_rtcp_rr_(0),
+          sent_rtcp_rrtr_(0),
+          sent_rtcp_dlrr_(0) {}
+
+   private:
+    // Receive stream should send RR packets (and RRTR packets if enabled).
+    virtual Action OnReceiveRtcp(const uint8_t* packet,
+                                 size_t length) OVERRIDE {
+      RTCPUtility::RTCPParserV2 parser(packet, length, true);
+      EXPECT_TRUE(parser.IsValid());
+
+      RTCPUtility::RTCPPacketTypes packet_type = parser.Begin();
+      while (packet_type != RTCPUtility::kRtcpNotValidCode) {
+        if (packet_type == RTCPUtility::kRtcpRrCode) {
+          ++sent_rtcp_rr_;
+        } else if (packet_type ==
+                   RTCPUtility::kRtcpXrReceiverReferenceTimeCode) {
+          ++sent_rtcp_rrtr_;
+        }
+        EXPECT_NE(packet_type, RTCPUtility::kRtcpSrCode);
+        EXPECT_NE(packet_type, RTCPUtility::kRtcpXrDlrrReportBlockItemCode);
+        packet_type = parser.Iterate();
+      }
+      return SEND_PACKET;
+    }
+    // Send stream should send SR packets (and DLRR packets if enabled).
+    virtual Action OnSendRtcp(const uint8_t* packet, size_t length) {
+      RTCPUtility::RTCPParserV2 parser(packet, length, true);
+      EXPECT_TRUE(parser.IsValid());
+
+      RTCPUtility::RTCPPacketTypes packet_type = parser.Begin();
+      while (packet_type != RTCPUtility::kRtcpNotValidCode) {
+        if (packet_type == RTCPUtility::kRtcpSrCode) {
+          ++sent_rtcp_sr_;
+        } else if (packet_type == RTCPUtility::kRtcpXrDlrrReportBlockItemCode) {
+          ++sent_rtcp_dlrr_;
+        }
+        EXPECT_NE(packet_type, RTCPUtility::kRtcpXrReceiverReferenceTimeCode);
+        packet_type = parser.Iterate();
+      }
+      if (sent_rtcp_sr_ > kNumRtcpReportPacketsToObserve &&
+          sent_rtcp_rr_ > kNumRtcpReportPacketsToObserve) {
+        if (enable_rrtr_) {
+          EXPECT_GT(sent_rtcp_rrtr_, 0);
+          EXPECT_GT(sent_rtcp_dlrr_, 0);
+        } else {
+          EXPECT_EQ(0, sent_rtcp_rrtr_);
+          EXPECT_EQ(0, sent_rtcp_dlrr_);
+        }
+        observation_complete_->Set();
+      }
+      return SEND_PACKET;
+    }
+    bool enable_rrtr_;
+    int sent_rtcp_sr_;
+    int sent_rtcp_rr_;
+    int sent_rtcp_rrtr_;
+    int sent_rtcp_dlrr_;
+  } observer(enable_rrtr);
+
+  CreateCalls(Call::Config(observer.SendTransport()),
+              Call::Config(observer.ReceiveTransport()));
+  observer.SetReceivers(receiver_call_->Receiver(), sender_call_->Receiver());
+
+  CreateTestConfigs();
+  receive_config_.rtp.rtcp_mode = newapi::kRtcpReducedSize;
+  receive_config_.rtp.rtcp_xr.receiver_reference_time_report = enable_rrtr;
+
+  CreateStreams();
+  CreateFrameGenerator();
+  StartSending();
+
+  EXPECT_EQ(kEventSignaled, observer.Wait())
+      << "Timed out while waiting for RTCP SR/RR packets to be sent.";
+
+  StopSending();
+  observer.StopSending();
+  DestroyStreams();
+}
+
+TEST_F(CallTest, ReceiverReferenceTimeReportEnabled) {
+  TestXrReceiverReferenceTimeReport(true);
+}
+
+TEST_F(CallTest, ReceiverReferenceTimeReportDisabled) {
+  TestXrReceiverReferenceTimeReport(false);
 }
 }  // namespace webrtc

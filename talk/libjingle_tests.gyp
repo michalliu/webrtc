@@ -288,8 +288,8 @@
         # Disabled because some tests fail.
         # TODO(ronghuawu): Reenable these tests.
         # 'media/devices/devicemanager_unittest.cc',
-        # 'media/webrtc/webrtcvideoengine_unittest.cc',
-        # 'media/webrtc/webrtcvoiceengine_unittest.cc',
+        'media/webrtc/webrtcvideoengine_unittest.cc',
+        'media/webrtc/webrtcvoiceengine_unittest.cc',
       ],
       'conditions': [
         ['OS=="win"', {
@@ -389,6 +389,7 @@
         'app/webrtc/peerconnectioninterface_unittest.cc',
         # 'app/webrtc/peerconnectionproxy_unittest.cc',
         'app/webrtc/remotevideocapturer_unittest.cc',
+        'app/webrtc/sctputils.cc',
         'app/webrtc/test/fakeaudiocapturemodule.cc',
         'app/webrtc/test/fakeaudiocapturemodule.h',
         'app/webrtc/test/fakeaudiocapturemodule_unittest.cc',

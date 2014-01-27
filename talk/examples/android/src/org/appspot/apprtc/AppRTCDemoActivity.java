@@ -178,6 +178,7 @@ public class AppRTCDemoActivity extends Activity
       PeerConnection pc) {
     DataChannel dc = pc.createDataChannel("dcLabel", new DataChannel.Init());
     abortUnless("dcLabel".equals(dc.label()), "WTF?");
+    dc.close();
     dc.dispose();
   }
 
@@ -417,6 +418,11 @@ public class AppRTCDemoActivity extends Activity
                 " anyway!");
           }
         });
+    }
+
+    @Override public void onRenegotiationNeeded() {
+      // No need to do anything; AppRTC follows a pre-agreed-upon
+      // signaling/negotiation protocol.
     }
   }
 

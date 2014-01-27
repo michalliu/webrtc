@@ -156,9 +156,11 @@ VideoSendStream::VideoSendStream(newapi::Transport* transport,
 
   if (config.encoder) {
     external_codec_ = ViEExternalCodec::GetInterface(video_engine);
-    if (external_codec_->RegisterExternalSendCodec(
-        channel_, config.codec.plType, config.encoder,
-        config.internal_source) != 0) {
+    if (external_codec_->RegisterExternalSendCodec(channel_,
+                                                   config.codec.plType,
+                                                   config.encoder,
+                                                   config.internal_source) !=
+        0) {
       abort();
     }
   }
@@ -168,9 +170,8 @@ VideoSendStream::VideoSendStream(newapi::Transport* transport,
     abort();
 
   if (overuse_detection) {
-    overuse_observer_.reset(
-        new ResolutionAdaptor(codec_, channel_, config_.codec.width,
-                              config_.codec.height));
+    overuse_observer_.reset(new ResolutionAdaptor(
+        codec_, channel_, config_.codec.width, config_.codec.height));
     video_engine_base_->RegisterCpuOveruseObserver(channel_,
                                                    overuse_observer_.get());
   }
@@ -186,9 +187,31 @@ VideoSendStream::VideoSendStream(newapi::Transport* transport,
   if (config.suspend_below_min_bitrate) {
     codec_->SuspendBelowMinBitrate(channel_);
   }
+
+  stats_proxy_.reset(new SendStatisticsProxy(config, this));
+
+  rtp_rtcp_->RegisterSendChannelRtcpStatisticsCallback(channel_,
+                                                       stats_proxy_.get());
+  rtp_rtcp_->RegisterSendChannelRtpStatisticsCallback(channel_,
+                                                      stats_proxy_.get());
+  rtp_rtcp_->RegisterSendBitrateObserver(channel_, stats_proxy_.get());
+  rtp_rtcp_->RegisterSendFrameCountObserver(channel_, stats_proxy_.get());
+
+  codec_->RegisterEncoderObserver(channel_, *stats_proxy_);
+  capture_->RegisterObserver(capture_id_, *stats_proxy_);
 }
 
 VideoSendStream::~VideoSendStream() {
+  capture_->DeregisterObserver(capture_id_);
+  codec_->DeregisterEncoderObserver(channel_);
+
+  rtp_rtcp_->DeregisterSendFrameCountObserver(channel_, stats_proxy_.get());
+  rtp_rtcp_->DeregisterSendBitrateObserver(channel_, stats_proxy_.get());
+  rtp_rtcp_->DeregisterSendChannelRtpStatisticsCallback(channel_,
+                                                        stats_proxy_.get());
+  rtp_rtcp_->DeregisterSendChannelRtcpStatisticsCallback(channel_,
+                                                         stats_proxy_.get());
+
   image_process_->DeRegisterPreEncodeCallback(channel_);
 
   network_->DeregisterSendTransport(channel_);
@@ -236,17 +259,15 @@ void VideoSendStream::SwapFrame(I420VideoFrame* frame) {
 VideoSendStreamInput* VideoSendStream::Input() { return this; }
 
 void VideoSendStream::StartSending() {
-  if (video_engine_base_->StartSend(channel_) != 0)
-    abort();
-  if (video_engine_base_->StartReceive(channel_) != 0)
-    abort();
+  transport_adapter_.Enable();
+  video_engine_base_->StartSend(channel_);
+  video_engine_base_->StartReceive(channel_);
 }
 
 void VideoSendStream::StopSending() {
-  if (video_engine_base_->StopSend(channel_) != 0)
-    abort();
-  if (video_engine_base_->StopReceive(channel_) != 0)
-    abort();
+  video_engine_base_->StopSend(channel_);
+  video_engine_base_->StopReceive(channel_);
+  transport_adapter_.Disable();
 }
 
 bool VideoSendStream::SetCodec(const VideoCodec& codec) {
@@ -263,7 +284,9 @@ bool VideoSendStream::SetCodec(const VideoCodec& codec) {
                             static_cast<unsigned char>(i));
   }
 
-  config_.codec = codec;
+  if (&config_.codec != &codec)
+    config_.codec = codec;
+
   if (config_.rtp.rtx.ssrcs.empty())
     return true;
 
@@ -276,10 +299,8 @@ bool VideoSendStream::SetCodec(const VideoCodec& codec) {
                             static_cast<unsigned char>(i));
   }
 
-  if (config_.rtp.rtx.rtx_payload_type != 0) {
-    rtp_rtcp_->SetRtxSendPayloadType(channel_,
-                                     config_.rtp.rtx.rtx_payload_type);
-  }
+  if (config_.rtp.rtx.payload_type != 0)
+    rtp_rtcp_->SetRtxSendPayloadType(channel_, config_.rtp.rtx.payload_type);
 
   return true;
 }
@@ -293,5 +314,21 @@ bool VideoSendStream::DeliverRtcp(const uint8_t* packet, size_t length) {
   return network_->ReceivedRTCPPacket(
              channel_, packet, static_cast<int>(length)) == 0;
 }
+
+VideoSendStream::Stats VideoSendStream::GetStats() const {
+  return stats_proxy_->GetStats();
+}
+
+bool VideoSendStream::GetSendSideDelay(VideoSendStream::Stats* stats) {
+  return codec_->GetSendSideDelay(
+      channel_, &stats->avg_delay_ms, &stats->max_delay_ms);
+}
+
+std::string VideoSendStream::GetCName() {
+  char rtcp_cname[ViERTP_RTCP::KMaxRTCPCNameLength];
+  rtp_rtcp_->GetRTCPCName(channel_, rtcp_cname);
+  return rtcp_cname;
+}
+
 }  // namespace internal
 }  // namespace webrtc

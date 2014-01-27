@@ -199,6 +199,10 @@ class ViEChannel
   void RegisterSendChannelRtpStatisticsCallback(
       StreamDataCountersCallback* callback);
 
+  // Called on update of RTP statistics.
+  void RegisterReceiveChannelRtpStatisticsCallback(
+      StreamDataCountersCallback* callback);
+
   void GetBandwidthUsage(uint32_t* total_bitrate_sent,
                          uint32_t* video_bitrate_sent,
                          uint32_t* fec_bitrate_sent,
@@ -400,7 +404,6 @@ class ViEChannel
   scoped_ptr<RtcpBandwidthObserver> bandwidth_observer_;
   int send_timestamp_extension_id_;
   int absolute_send_time_extension_id_;
-  bool using_packet_spread_;
 
   Transport* external_transport_;
 

@@ -246,6 +246,13 @@ struct RtcpStatistics {
   uint32_t cumulative_lost;
   uint32_t extended_max_sequence_number;
   uint32_t jitter;
+
+  bool operator==(const RtcpStatistics& other) const {
+    return fraction_lost == other.fraction_lost &&
+           cumulative_lost == other.cumulative_lost &&
+           extended_max_sequence_number == other.extended_max_sequence_number &&
+           jitter == other.jitter;
+  }
 };
 
 // Callback, called whenever a new rtcp report block is transmitted.
@@ -273,6 +280,13 @@ struct StreamDataCounters {
   uint32_t packets;  // Number of packets.
   uint32_t retransmitted_packets;  // Number of retransmitted packets.
   uint32_t fec_packets;  // Number of redundancy packets.
+
+  bool operator==(const StreamDataCounters& other) const {
+    return bytes == other.bytes && header_bytes == other.header_bytes &&
+           padding_bytes == other.padding_bytes && packets == other.packets &&
+           retransmitted_packets == other.retransmitted_packets &&
+           fec_packets == other.fec_packets;
+  }
 };
 
 // Callback, called whenever byte/packet counts have been updated.
@@ -598,11 +612,6 @@ struct VideoCodecVP8
     int                  keyFrameInterval;
 };
 
-// Unknown specific
-struct VideoCodecGeneric
-{
-};
-
 // Video codec types
 enum VideoCodecType
 {
@@ -617,7 +626,6 @@ enum VideoCodecType
 union VideoCodecUnion
 {
     VideoCodecVP8       VP8;
-    VideoCodecGeneric   Generic;
 };
 
 

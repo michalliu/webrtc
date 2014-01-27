@@ -166,7 +166,8 @@ class SctpDataMediaChannel : public DataMediaChannel,
   // TODO(pthatcher): Cleanup MediaChannel interface, or at least
   // don't try calling these and return false.  Right now, things
   // don't work if we return false.
-  virtual bool SetSendBandwidth(bool autobw, int bps) { return true; }
+  virtual bool SetStartSendBandwidth(int bps) { return true; }
+  virtual bool SetMaxSendBandwidth(int bps) { return true; }
   virtual bool SetRecvRtpHeaderExtensions(
       const std::vector<RtpHeaderExtension>& extensions) { return true; }
   virtual bool SetSendRtpHeaderExtensions(

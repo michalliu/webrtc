@@ -67,8 +67,6 @@
         'level_estimator_impl.h',
         'noise_suppression_impl.cc',
         'noise_suppression_impl.h',
-        'splitting_filter.cc',
-        'splitting_filter.h',
         'processing_component.cc',
         'processing_component.h',
         'utility/delay_estimator.c',
@@ -102,6 +100,17 @@
             'ns/nsx_core.c',
             'ns/nsx_core.h',
             'ns/nsx_defines.h',
+          ],
+          'conditions': [
+            ['target_arch=="mipsel"', {
+              'sources': [
+                'ns/nsx_core_mips.c',
+              ],
+            }, {
+              'sources': [
+                'ns/nsx_core_c.c',
+              ],
+            }],
           ],
         }, {
           'defines': ['WEBRTC_NS_FLOAT'],

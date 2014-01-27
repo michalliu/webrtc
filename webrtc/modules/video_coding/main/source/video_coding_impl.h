@@ -32,6 +32,8 @@ class EncodedFrameObserver;
 
 namespace vcm {
 
+class DebugRecorder;
+
 class VCMProcessTimer {
  public:
   VCMProcessTimer(uint32_t periodMs, Clock* clock)
@@ -52,7 +54,10 @@ class VideoSender {
  public:
   typedef VideoCodingModule::SenderNackMode SenderNackMode;
 
-  VideoSender(const int32_t id, Clock* clock);
+  VideoSender(const int32_t id,
+              Clock* clock,
+              EncodedImageCallback* post_encode_callback);
+
   ~VideoSender();
 
   int32_t InitializeSender();
@@ -96,13 +101,10 @@ class VideoSender {
   int SetSenderKeyFramePeriod(int periodMs);
 
   int StartDebugRecording(const char* file_name_utf8);
-  int StopDebugRecording();
+  void StopDebugRecording();
 
   void SuspendBelowMinBitrate();
   bool VideoSuspended() const;
-
-  void RegisterPostEncodeImageCallback(
-      EncodedImageCallback* post_encode_callback);
 
   int32_t TimeUntilNextProcess();
   int32_t Process();
@@ -111,6 +113,8 @@ class VideoSender {
   int32_t _id;
   Clock* clock_;
 
+  scoped_ptr<DebugRecorder> recorder_;
+
   scoped_ptr<CriticalSectionWrapper> process_crit_sect_;
   CriticalSectionWrapper* _sendCritSect;
   VCMGenericEncoder* _encoder;
@@ -118,7 +122,6 @@ class VideoSender {
   std::vector<FrameType> _nextFrameTypes;
   media_optimization::MediaOptimization _mediaOpt;
   VCMSendStatisticsCallback* _sendStatsCallback;
-  FILE* _encoderInputFile;
   VCMCodecDataBase _codecDataBase;
   bool frame_dropper_enabled_;
   VCMProcessTimer _sendStatsTimer;

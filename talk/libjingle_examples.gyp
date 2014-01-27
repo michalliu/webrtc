@@ -51,7 +51,7 @@
         'libjingle.gyp:libjingle_p2p',
       ],
       'sources': [
-        'p2p/base/relayserver_main.cc',
+        'examples/relayserver/relayserver_main.cc',
       ],
     },  # target relayserver
     {
@@ -62,7 +62,7 @@
         'libjingle.gyp:libjingle_p2p',
       ],
       'sources': [
-        'p2p/base/stunserver_main.cc',
+        'examples/stunserver/stunserver_main.cc',
       ],
     },  # target stunserver
     {
@@ -73,7 +73,7 @@
         'libjingle.gyp:libjingle_p2p',
       ],
       'sources': [
-        'p2p/base/turnserver_main.cc',
+        'examples/turnserver/turnserver_main.cc',
       ],
     },  # target turnserver
     {
@@ -315,7 +315,7 @@
                 'cp <(PRODUCT_DIR)/libjingle_peerconnection.jar examples/android/libs/ &&'
                 '<(android_strip) -o examples/android/libs/<(android_app_abi)/libjingle_peerconnection_so.so  <(PRODUCT_DIR)/libjingle_peerconnection_so.so &&'
                 'cd examples/android && '
-                '{ ant -q -l <(ant_log) debug || '
+                '{ ant debug > <(ant_log) 2>&1 || '
                 '  { cat <(ant_log) ; exit 1; } } && '
                 'cd - > /dev/null && '
                 'cp examples/android/bin/AppRTCDemo-debug.apk <(_outputs)'
